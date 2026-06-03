@@ -1,20 +1,27 @@
-module mac_unit #(parameter DATA_WIDTH = 32)(
-    input wire clk, 
-    input wire rst_n,
-    input wire signed [DATA_WIDTH-1:0] a,
-    input wire signed [DATA_WIDTH-1:0] b,
-    output reg signed [DATA_WIDTH*2-1:0] mult_result
+`timescale 1ns / 1ps
+
+// Module: mac_unit
+module mac_unit #(
+    parameter DATA_WIDTH = 32  // Bit-width of the input operands
+)(
+    input  wire                              clk,         // System clock signal
+    input  wire                              rst_n,       // Active-low asynchronous reset
+    input  wire signed [DATA_WIDTH-1:0]      a,           // Multiplicand A
+    input  wire signed [DATA_WIDTH-1:0]      b,           // Multiplier B
+    
+    output reg  signed [(DATA_WIDTH*2)-1:0]  mult_result  // Full-precision registered product
 );
-    //reg signed [63:0] product_full;
+
+    // Synchronous Multiplication Logic
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-           // product_full <= 64'd0;
+            // Reset condition: Clear the output register
             mult_result  <= 64'd0;
         end else begin
+            // Perform signed multiplication
             mult_result <= $signed(a) * $signed(b);
-            // Extract Q16.16 from the 64-bit product
-            //mult_result  <= product_full[47:16]; 
         end
     end
+    
 endmodule
