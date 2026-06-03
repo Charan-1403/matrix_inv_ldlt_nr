@@ -1,26 +1,43 @@
-module master_fsm #(parameter N = 7, parameter ADDR_WIDTH = 7, parameter DATA_WIDTH = 32) (
-    input wire clk, rst_n,
-    input wire start, nr_done,
-    output reg nr_start,
-    output reg L_wr_en, U_wr_en, D_wr_en, A_wr_en,
-    input wire L1_rd_val, L2_rd_val, D_rd_val, A_rd_val, U1_rd_val, U2_rd_val, Dinv_rd_val,
-    input wire signed[DATA_WIDTH-1:0] A, L1, L2, U1, U2, D, Dinv,
-    output reg [ADDR_WIDTH-1:0] A_rd_addr, L1_rd_addr, L2_rd_addr, U1_rd_addr, U2_rd_addr, D_rd_addr, Dinv_rd_addr,
-    output reg [ADDR_WIDTH-1:0] L_wr_addr, U_wr_addr, D_wr_addr, A_wr_addr,
-    output reg signed [DATA_WIDTH-1:0] L_wr_data, U_wr_data, D_wr_data, A_wr_data,
-    output reg done
+`timescale 1ns / 1ps
+
+module master_fsm #(
+    parameter N          = 7,  // Dimension of the matrix (N x N)
+    parameter ADDR_WIDTH = 7,  // Bit-width of the address buses
+    parameter DATA_WIDTH = 32  // Bit-width of the data elements (Q16.16)
+) (
+    input  wire                          clk, rst_n,    // System clock and active-low reset
+    input  wire                          start,         // Trigger to begin inversion process
+    input  wire                          nr_done,       // Completion flag from Newton-Raphson core
+    
+    output reg                           nr_start,      // Start trigger for Newton-Raphson core
+    output reg                           L_wr_en,       // Write enable for L_BRAM
+    output reg                           U_wr_en,       // Write enable for U_BRAM
+    output reg                           D_wr_en,       // Write enable for D_BRAM
+    output reg                           A_wr_en,       // Write enable for A_BRAM
+    
+    input  wire                          L1_rd_val, L2_rd_val, D_rd_val, A_rd_val, U1_rd_val, U2_rd_val, Dinv_rd_val, // Read valid flags (legacy/unused)
+    input  wire signed [DATA_WIDTH-1:0]  A, L1, L2, U1, U2, D, Dinv, // Data outputs from respective BRAMs
+    
+    output reg         [ADDR_WIDTH-1:0]  A_rd_addr, L1_rd_addr, L2_rd_addr, U1_rd_addr, U2_rd_addr, D_rd_addr, Dinv_rd_addr, // Read address pointers
+    output reg         [ADDR_WIDTH-1:0]  L_wr_addr, U_wr_addr, D_wr_addr, A_wr_addr, // Write address pointers
+    output reg  signed [DATA_WIDTH-1:0]  L_wr_data, U_wr_data, D_wr_data, A_wr_data, // Write data payloads
+    
+    output reg                           done           // Final completion flag sent to host
 );
     
-    wire[ADDR_WIDTH-1:0] addr_1_r, addr_2_r, addr_3_r, addr_w;
-    wire[63:0] intmd_mult_result;
+    // Internal Wires and Registers
+    wire [ADDR_WIDTH-1:0]        addr_1_r, addr_2_r, addr_3_r, addr_w; // Translated addresses from AGU
+    wire [63:0]                  intmd_mult_result;                    // Combinational 64-bit diff * Dinv result
     
-    reg nr_done_sticky;
+    reg                          nr_done_sticky;                       // Held flag to catch asynchronous NR completion
     
-    reg[7:0] i,j,k;
-    reg[1:0] phase;
-    reg signed[DATA_WIDTH-1:0] op1, op2, op3;
-    wire signed[DATA_WIDTH-1:0] result;
+    reg  [7:0]                   i, j, k;                              // Loop iterators (row, col, dot-product)
+    reg  [1:0]                   phase;                                // 0: LDL^T, 1: Fwd Sub, 2: Inverse
+    reg  signed [DATA_WIDTH-1:0] op1, op2, op3;                        // Dynamically routed inputs to DSP cascade
+    wire signed [DATA_WIDTH-1:0] result;                               // Truncated product from DSP cascade
     
+    // Operand Multiplexer
+    // Routes appropriate BRAM data to the DSP inputs based on current phase
     always@(*) begin
         if(!rst_n) begin
             op1 = 0;
@@ -38,7 +55,7 @@ module master_fsm #(parameter N = 7, parameter ADDR_WIDTH = 7, parameter DATA_WI
                 2'b01: begin
                     op1 = L1;
                     op2 = U1;
-                    op3 = -32'd65536;
+                    op3 = -32'd65536; // Represents -1.0 in Q16.16 format
                 end
                 
                 2'b10: begin
@@ -56,14 +73,12 @@ module master_fsm #(parameter N = 7, parameter ADDR_WIDTH = 7, parameter DATA_WI
         end
     end
     
-    
-always@(*) begin
-        // 1. ALL defaults must be set here to prevent 'X' latches!
+    // Address Router and Latch-Prevention
+    // Routes AGU addresses to BRAM ports based on phase and FSM state
+    always@(*) begin
         L1_rd_addr = 0; L2_rd_addr = 0; D_rd_addr = 0; D_wr_addr = 0;
         A_rd_addr = 0; U1_rd_addr = 0; U2_rd_addr = 0; L_wr_addr = 0;
         U_wr_addr = 0; A_wr_addr = 0;
-        
-        // ---> YOU WERE MISSING THIS DEFAULT <---
         Dinv_rd_addr = 0; 
         
         if(phase == 0) begin
@@ -71,8 +86,6 @@ always@(*) begin
             L2_rd_addr   = addr_2_r;
             D_rd_addr    = addr_3_r;
             D_wr_addr    = addr_w;
-            
-            // ---> YOU WERE MISSING THESE THREE <---
             A_rd_addr    = addr_w;       
             L_wr_addr    = addr_w;       
             Dinv_rd_addr = (j * N) + j;  
@@ -91,52 +104,62 @@ always@(*) begin
         end
     end
     
-    address_gen #(.N(N)) agu (.clk(clk),
-                     .rst_n(rst_n),
-                     .i(i),
-                     .j(j),
-                     .k(k),
-                     .phase(phase),
-                     .addr_1_r(addr_1_r),
-                     .addr_2_r(addr_2_r),
-                     .addr_3_r(addr_3_r),
-                     .addr_w(addr_w));    
+    // Instantiation: Address Generation Unit
+    address_gen #(.N(N)) agu (
+        .clk(clk),
+        .rst_n(rst_n),
+        .i(i),
+        .j(j),
+        .k(k),
+        .phase(phase),
+        .addr_1_r(addr_1_r),
+        .addr_2_r(addr_2_r),
+        .addr_3_r(addr_3_r),
+        .addr_w(addr_w)
+    );    
                      
-    dsp_cascade dsp (.clk(clk),
-                     .rst_n(rst_n),
-                     .op1(op1),
-                     .op2(op2),
-                     .op3(op3),
-                     .result(result));
+    // Instantiation: Pipelined DSP Cascade (MAC)
+    dsp_cascade dsp (
+        .clk(clk),
+        .rst_n(rst_n),
+        .op1(op1),
+        .op2(op2),
+        .op3(op3),
+        .result(result)
+    );
 
-    localparam IDLE      = 4'd0;
-    localparam COMPUTE   = 4'd1;
-    localparam DRAIN     = 4'd2;
-    localparam NEXT_ELEM = 4'd3;
+    // FSM State Encodings
+    localparam IDLE           = 4'd0;
+    localparam COMPUTE        = 4'd1;
+    localparam DRAIN          = 4'd2;
+    localparam NEXT_ELEM      = 4'd3;
     localparam WRITEBACK_PREP = 4'd4;
     localparam WRITEBACK_EXEC = 4'd5;
-    localparam DONE_ST   = 4'd6;
-    localparam NR_SYNC = 4'd7;
-    localparam MIRROR_WRITE = 4'd8;
+    localparam DONE_ST        = 4'd6;
+    localparam NR_SYNC        = 4'd7;
+    localparam MIRROR_WRITE   = 4'd8;
 
-    reg [3:0] state;
-    reg [2:0] drain_cnt;
-    reg signed [DATA_WIDTH-1:0] diff_reg, accum_reg;
-    reg [4:0] accum_sig_pipeline;
-    reg k_done;
-    wire accum_valid = (state == COMPUTE) && (!k_done);
+    // Iteration & Pipeline Registers
+    reg [3:0]                   state;              // Current FSM state
+    reg [2:0]                   drain_cnt;          // Counter for DSP pipeline flush
+    reg signed [DATA_WIDTH-1:0] diff_reg;           // Intermediate subtraction result
+    reg signed [DATA_WIDTH-1:0] accum_reg;          // Multiply-accumulate total sum
+    reg [4:0]                   accum_sig_pipeline; // Delay shift register for MAC valid signal
+    reg                         k_done;             // Iterator boundary flag
+    wire                        accum_valid = (state == COMPUTE) && (!k_done);
+    
+    // Loop Boundary Logic (Phase Dependent)
     always @(*) begin
         case(phase)
-            // Phase 0 (LDL^T): k goes from 0 to j-1
-            2'd0: k_done = (k >= j); 
-            // Phase 1 (M = L^-1): k goes from j to i-1
-            2'd1: k_done = (k >= i); 
-            // Phase 2 (A^-1): k goes from i to N-1
-            2'd2: k_done = (k >= N); 
+            2'd0: k_done = (k >= j); // Phase 0 (LDL^T): k goes from 0 to j-1
+            2'd1: k_done = (k >= i); // Phase 1 (M = L^-1): k goes from j to i-1
+            2'd2: k_done = (k >= N); // Phase 2 (A^-1): k goes from i to N-1
             default: k_done = 1'b1;
         endcase
     end
     
+    // Newton-Raphson Sticky Flag
+    // Catches the asynchronous pulse and holds it for FSM synchronization
     always@(posedge clk) begin
         if(!rst_n) nr_done_sticky <= 0;
         else begin
@@ -146,6 +169,8 @@ always@(*) begin
         end
     end
     
+    // MAC Delay Pipeline
+    // Synchronizes the accumulator enable with the latency of the DSP core
     always@(posedge clk) begin
         if(!rst_n) accum_sig_pipeline <= 5'b0;
         else begin
@@ -153,16 +178,16 @@ always@(*) begin
         end
     end
     
+    // Accumulator Register
     always@(posedge clk) begin
         if(!rst_n) accum_reg <= 0;
         else begin
             if(state == NEXT_ELEM || state == IDLE) accum_reg <= 0;
             else if(accum_sig_pipeline[0]) accum_reg <= accum_reg + result;
-            
         end
     end
     
-
+    // Main Sequential FSM and Iteration Controller
     always @(posedge clk) begin
         if (!rst_n) begin
             state     <= IDLE;
@@ -177,7 +202,6 @@ always@(*) begin
             A_wr_en <= 0;
             U_wr_en <= 0;
             L_wr_en <= 0;
-            
             
             case(state)
                 IDLE: begin
@@ -203,11 +227,10 @@ always@(*) begin
                 end
                 
                 DRAIN: begin
-                    // Wait 2 clock cycles for the 2-stage DSP cascade to finish
+                    // Wait clock cycles for the DSP cascade to finish
                     if (drain_cnt == 3'd5) begin
                         if(phase == 2'b00 && i > j)state <= NR_SYNC;
                         else state <= WRITEBACK_PREP;
-                        // Here is where you will eventually pulse your write enables (L_wr_en, etc)
                     end else begin
                         drain_cnt <= drain_cnt + 1;
                     end
@@ -248,14 +271,12 @@ always@(*) begin
                     endcase
                     if (phase == 2'd2 && i == j)state <= NEXT_ELEM;
                     else state <= MIRROR_WRITE;
-                   // if (U_wr_en) $display("  [DEBUG] Writing to U_RAM at Addr: %d", U_wr_addr);
                 end
                 
                 MIRROR_WRITE: begin
                     A_wr_en <= 1'b1;
-                     // Mirror the coordinates
-                    A_wr_data <= accum_reg;
-                    state <= NEXT_ELEM; // Then proceed to the next element
+                    A_wr_data <= accum_reg; // Mirror the coordinates
+                    state <= NEXT_ELEM;     // Then proceed to the next element
                 end
                 
                 NEXT_ELEM: begin
@@ -274,7 +295,7 @@ always@(*) begin
                     else if (j < (phase == 2'd1 ? N - 2 : N - 1)) begin
                         j <= j + 1;
                         
-                        // ---> CORRECTED BOUNDARY GUARDS <---
+                        // Boundary Guards
                         if (phase == 2'd1) begin
                             if (j + 2 < N) i <= j + 2; 
                             else           i <= N - 1; // Clamp!
@@ -312,6 +333,7 @@ always@(*) begin
         end
     end
     
+    // Combinational Scaling
     assign intmd_mult_result = ($signed(diff_reg) * $signed(Dinv));
     
 endmodule
