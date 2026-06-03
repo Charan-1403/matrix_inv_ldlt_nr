@@ -61,6 +61,7 @@ always@(*) begin
         // 1. ALL defaults must be set here to prevent 'X' latches!
         L1_rd_addr = 0; L2_rd_addr = 0; D_rd_addr = 0; D_wr_addr = 0;
         A_rd_addr = 0; U1_rd_addr = 0; U2_rd_addr = 0; L_wr_addr = 0;
+        U_wr_addr = 0; A_wr_addr = 0;
         
         // ---> YOU WERE MISSING THIS DEFAULT <---
         Dinv_rd_addr = 0; 
