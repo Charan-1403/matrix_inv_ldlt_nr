@@ -62,7 +62,12 @@ module nr_inversion #(parameter DATA_WIDTH = 32)(
     // ------------------------------------------------------------------
     reg signed [DATA_WIDTH-1:0] op_a, op_b;
     wire signed [63:0] full_mult = $signed(op_a) * $signed(op_b);
-    wire signed [DATA_WIDTH-1:0] trunc_mult = full_mult[47:16];
+    reg signed [DATA_WIDTH-1:0] trunc_mult;
+    
+    always@(posedge clk) begin
+        if(!rst_n) trunc_mult <= 0;
+        else trunc_mult <= full_mult[47:16];
+    end
 
     // ------------------------------------------------------------------
     // 5. Output Denormalization 
